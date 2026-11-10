@@ -1,18 +1,27 @@
 from pymavlink import mavutil
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import os
 import math
 import time
 import subprocess
 
-try:
-    import gphoto2 as gp
-    HAS_GPHOTO = True
-except:
-    HAS_GPHOTO = False
+# ---------- Settings ----------
+# Where the flight controller is:
+#   'udp:127.0.0.1:14550'   -> SITL / MAVProxy (desk testing)
+#   '/dev/ttyACM0'          -> flight controller over USB
+#   '/dev/ttyTHS1'          -> flight controller on Jetson 40-pin UART (check: ls /dev/ttyTHS*)
+MAV_CONNECTION = os.environ.get("MAV_CONNECTION", "/dev/ttyACM0")
+MAV_BAUD = int(os.environ.get("MAV_BAUD", "115200"))
+TRIGGER_DIST = 10  # metres between photos
 
-os.makedirs("/home/lillianxu_88/mapping_drone/photos", exist_ok=True)
+# Save next to this script, so it works for any username (Pi or Jetson)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+RUN_NAME = datetime.now().strftime("%Y%m%d_%H%M%S")
+PHOTO_DIR = os.path.join(BASE_DIR, "photos", RUN_NAME)   # new folder every run -> no overwriting
+LOG_PATH = os.path.join(BASE_DIR, "flight_log.jsonl")
+os.makedirs(PHOTO_DIR, exist_ok=True)
+
 
 def haversine(lat1, lon1, lat2, lon2):
     R = 6371000
@@ -21,87 +30,87 @@ def haversine(lat1, lon1, lat2, lon2):
     a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
 
-def connect_camera():
-    if not HAS_GPHOTO:
-        print("gphoto2 not available - camera disabled")
-        return None
-    try:
-        subprocess.run(['pkill', '-f', 'gvfs-gphoto2'], capture_output=True)
-        time.sleep(1)
-        camera = gp.Camera()
-        camera.init()
-        print("Camera connected")
-        return camera
-    except:
-        print("No camera found - running without camera")
-        return None
 
-def main():
-    #mav = mavutil.mavlink_connection('udp:127.0.0.1:14550')
-    # USB (desk testing):
+def connect_mavlink():
     while True:
         try:
-            #mav = mavutil.mavlink_connection('/dev/ttyACM0', baud=115200)
-            mav = mavutil.mavlink_connection('udp:127.0.0.1:14550')
-            mav.wait_heartbeat()
-            print("Connected to flight controller")
-            break
-        except:
-            print("Waiting for flight controller...")
-            time.sleep(5)
+            mav = mavutil.mavlink_connection(MAV_CONNECTION, baud=MAV_BAUD)
+            if mav.wait_heartbeat(timeout=10):
+                print(f"Connected to flight controller on {MAV_CONNECTION}", flush=True)
+                return mav
+            print("No heartbeat yet...", flush=True)
+        except Exception as e:
+            print(f"Waiting for flight controller ({e})", flush=True)
+        time.sleep(5)
 
+
+def main():
+    print(f"Saving photos to {PHOTO_DIR}", flush=True)
+    mav = connect_mavlink()
+
+    # Stop the desktop from grabbing the camera
     subprocess.run(['pkill', '-f', 'gvfs-gphoto2'], capture_output=True)
     time.sleep(1)
 
-    TRIGGER_DIST = 10
     last_lat = None
     last_lon = None
-
     shot_count = 0
-    log_file = open("/home/lillianxu_88/mapping_drone/flight_log.jsonl", "a")
 
-    while True:
-        msg = mav.recv_match(type='GLOBAL_POSITION_INT', blocking=True, timeout=1)
-        if msg:
+    with open(LOG_PATH, "a") as log_file:
+        while True:
+            msg = mav.recv_match(type='GLOBAL_POSITION_INT', blocking=True, timeout=1)
+            if not msg:
+                continue
+
             lat = msg.lat / 1e7
             lon = msg.lon / 1e7
             alt = msg.relative_alt / 1000
 
             if lat == 0 and lon == 0:
+                continue  # no GPS fix yet
+
+            if last_lat is not None and haversine(last_lat, last_lon, lat, lon) < TRIGGER_DIST:
                 continue
 
-            should_trigger = False
-            if last_lat is None:
-                should_trigger = True
-            elif haversine(last_lat, last_lon, lat, lon) >= TRIGGER_DIST:
-                should_trigger = True
+            shot_count += 1
+            last_lat, last_lon = lat, lon
+            filename = os.path.join(PHOTO_DIR, f"shot_{shot_count}.jpg")
+            shot_time = datetime.now(timezone.utc).isoformat()
 
-            if should_trigger:
-                shot_count += 1
-                last_lat = lat
-                last_lon = lon
-                print(f"Should take photo {shot_count}")
+            try:
                 result = subprocess.run(
-                     ['gphoto2', '--capture-image-and-download', '--force-overwrite',
-                     '--filename', f'/home/lillianxu_88/mapping_drone/photos/shot_{shot_count}.jpg'],
-                     capture_output=True, text=True, timeout=60
-                      )
-#                result = subprocess.run( ['gphoto2', '--capture-image'],
- #                   capture_output=True, text=True, timeout=10)
-                if result.returncode == 0:
-                    print(f"Shot {shot_count} at {lat}, {lon}, {alt}m")
-                else:
-                    print(f"Camera error: {result.stderr.strip()}")
+                    ['gphoto2', '--capture-image-and-download', '--force-overwrite',
+                     '--filename', filename],
+                    capture_output=True, text=True, timeout=60
+                )
+                ok = result.returncode == 0
+                err = "" if ok else result.stderr.strip()
+            except subprocess.TimeoutExpired:
+                ok, err = False, "timeout"
 
-                entry = {
-                    "shot": shot_count,
-                    "time": datetime.utcnow().isoformat(),
-                    "lat": lat,
-                    "lon": lon,
-                    "alt": alt                }
-                log_file.write(json.dumps(entry) + "\n")
-                log_file.flush()
+            if ok:
+                print(f"Shot {shot_count} at {lat}, {lon}, {alt}m", flush=True)
+            else:
+                print(f"Camera error on shot {shot_count}: {err}", flush=True)
+
+            entry = {
+                "run": RUN_NAME,
+                "shot": shot_count,
+                "file": os.path.basename(filename),
+                "ok": ok,
+                "time": shot_time,
+                "lat": lat,
+                "lon": lon,
+                "alt": alt,
+            }
+            log_file.write(json.dumps(entry) + "\n")
+            log_file.flush()
+
+            # Throw away GPS messages that piled up while the camera was busy,
+            # so the next decision uses the CURRENT position, not an old one.
+            while mav.recv_match(type='GLOBAL_POSITION_INT', blocking=False):
+                pass
+
 
 if __name__ == "__main__":
     main()
-

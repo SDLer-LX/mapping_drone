@@ -1,6 +1,7 @@
 import json
+from lib import paths
 
-REDO_FILE = "/home/lillianxu_88/mapping_drone/redo_waypoints.jsonl"
+REDO_FILE = paths.REDO_FILE
 
 def save_redo(lat, lon, alt, reason=""):
     entry = {"lat": lat, "lon": lon, "alt": alt, "reason": reason}

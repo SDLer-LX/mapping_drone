@@ -1,0 +1,4 @@
+__pycache__/
+# Everything trigger.py and the tests generate
+output/*
+!output/old/

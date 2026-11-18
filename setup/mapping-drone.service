@@ -1,0 +1,19 @@
+[Unit]
+Description=Mapping drone photo trigger (trigger.py)
+# No network dependency on purpose - must work with no Wi-Fi in the air
+After=local-fs.target
+
+[Service]
+Type=simple
+User=uav
+# dialout = access to the Cube's USB serial port
+SupplementaryGroups=dialout plugdev
+WorkingDirectory=/home/uav/mapping_drone
+Environment=PYTHONUNBUFFERED=1
+# trigger.py writes its own log to output/trigger_output.log (also in: journalctl -u mapping-drone)
+ExecStart=/home/uav/venv-drone/bin/python -u /home/uav/mapping_drone/trigger.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

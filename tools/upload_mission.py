@@ -1,14 +1,12 @@
+import os, sys; sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # so lib/ and trigger.py can be imported
 from pymavlink import mavutil
-import json
+import os
 
-REDO_FILE = "/home/lillianxu_88/mapping_drone/redo_waypoints.jsonl"
+from lib.redo_list import load_redos
 
-def load_redos():
-    try:
-        with open(REDO_FILE, "r") as f:
-            return [json.loads(line) for line in f]
-    except FileNotFoundError:
-        return []
+# Same settings as trigger.py
+MAV_CONNECTION = os.environ.get("MAV_CONNECTION", "/dev/ttyACM0")
+MAV_BAUD = int(os.environ.get("MAV_BAUD", "115200"))
 
 def upload_mission(mav, waypoints):
     mav.mav.mission_count_send(
@@ -17,11 +15,13 @@ def upload_mission(mav, waypoints):
         len(waypoints) + 1
     )
 
-    for i in range(len(waypoints) + 1):
-        msg = mav.recv_match(type='MISSION_REQUEST_INT', blocking=True, timeout=5)
+    for _ in range(len(waypoints) + 1):
+        # ArduPilot can ask with either message type; answer the item it asks for
+        msg = mav.recv_match(type=['MISSION_REQUEST_INT', 'MISSION_REQUEST'], blocking=True, timeout=5)
         if msg is None:
             print("Cube stopped asking for waypoints")
             return False
+        i = msg.seq
 
         if i == 0:
             wp = waypoints[0]
@@ -45,13 +45,14 @@ def upload_mission(mav, waypoints):
         print(f"Sent waypoint {i}: {wp['lat']}, {wp['lon']}")
 
     msg = mav.recv_match(type='MISSION_ACK', blocking=True, timeout=5)
-    if msg:
+    if msg and msg.type == mavutil.mavlink.MAV_MISSION_ACCEPTED:
         print("Mission uploaded!")
         return True
+    print(f"Mission upload failed: {msg}")
     return False
 
 if __name__ == "__main__":
-    mav = mavutil.mavlink_connection('/dev/ttyACM0', baud=115200)
+    mav = mavutil.mavlink_connection(MAV_CONNECTION, baud=MAV_BAUD)
     mav.wait_heartbeat()
     print("Connected")
 

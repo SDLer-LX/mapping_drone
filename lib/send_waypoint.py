@@ -1,3 +1,5 @@
+from pymavlink import mavutil
+
 
 def send_waypoint(mav, lat, lon, alt):
     """New Waypoint to be planned"""
